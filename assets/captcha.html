@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+	<title>安全验证</title>
+	<style>
+		html, body {
+			margin: 0;
+			padding: 0;
+			width: 100%;
+			height: 100%;
+			background-color: transparent !important;
+			overflow: hidden;
+			-webkit-tap-highlight-color: transparent;
+			user-select: none;
+		}
+		/* 加载指示器 */
+		.captcha-loading {
+			position: absolute;
+			top: 50%;
+			left: 50%;
+			transform: translate(-50%, -50%);
+			background: rgba(15, 23, 42, 0.78);
+			backdrop-filter: blur(8px);
+			color: #ffffff;
+			padding: 14px 22px;
+			border-radius: 12px;
+			font-size: 13px;
+			font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+			display: flex;
+			align-items: center;
+			box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+			transition: opacity 0.2s ease;
+		}
+		.spinner {
+			width: 16px;
+			height: 16px;
+			border: 2px solid rgba(255, 255, 255, 0.3);
+			border-top-color: #ffffff;
+			border-radius: 50%;
+			animation: spin 0.8s linear infinite;
+			margin-right: 10px;
+		}
+		@keyframes spin {
+			to { transform: rotate(360deg); }
+		}
+		.hidden {
+			opacity: 0;
+			pointer-events: none;
+		}
+	</style>
+	<!-- 腾讯防水墙官方最新 JS SDK -->
+	<script src="https://turing.captcha.qcloud.com/TCaptcha.js"></script>
+</head>
+<body>
+	<div id="loadingIndicator" class="captcha-loading">
+		<div class="spinner"></div>
+		<span>正在拉取安全验证...</span>
+	</div>
+
+	<script>
+		// 获取 URL 查询参数
+		function getQueryParam(name) {
+			var reg = new RegExp("(^|&)" + name + "=([^&]*)(&|$)", "i");
+			var match = window.location.search.substr(1).match(reg);
+			if (match != null) return decodeURIComponent(match[2]);
+			return null;
+		}
+
+		var hasNotified = false;
+
+		// 向宿主环境回传验证凭证
+		function sendResultToHost(result) {
+			if (hasNotified) return;
+			hasNotified = true;
+
+			console.log('[TCaptcha Webview] 收到验证结果，准备回传:', JSON.stringify(result));
+
+			// 隐藏加载状态
+			hideLoading();
+
+			var resJson = JSON.stringify(result);
+
+			// 方案一 (最稳妥的跨环境原生通道)：URL Scheme 拦截触发 overrideUrlLoading
+			try {
+				location.href = "tcaptcha://result?data=" + encodeURIComponent(resJson);
+			} catch (e) {
+				console.error('[TCaptcha Webview] URL Scheme 通知异常:', e);
+			}
+
+			// 方案二：尝试通过 plus 原生对象直接关闭自身与兜底通知
+			setTimeout(function() {
+				try {
+					if (window.plus) {
+						var cur = plus.webview.currentWebview();
+						var opener = cur.opener();
+						if (opener) {
+							// 兜底派发（兼容不同运行模式）
+							opener.evalJS("try{uni.$emit('__APP_TCAPTCHA_RESULT__', " + resJson + ")}catch(e){}");
+						}
+						// 延迟关闭当前透明浮层
+						setTimeout(function() {
+							cur.close('fade-out', 100);
+						}, 80);
+					}
+				} catch (err) {
+					console.error('[TCaptcha Webview] plus 兜底异常:', err);
+				}
+			}, 30);
+		}
+
+		// 隐藏加载状态
+		function hideLoading() {
+			var el = document.getElementById('loadingIndicator');
+			if (el) el.classList.add('hidden');
+		}
+
+		// 实例化并唤起腾讯防水墙
+		function triggerCaptcha() {
+			var appId = getQueryParam('appId') || '2091064951';
+
+			try {
+				if (typeof TencentCaptcha !== 'function') {
+					console.error('[TCaptcha Webview] TencentCaptcha SDK 未定义');
+					sendResultToHost({ ret: -1, errMsg: '腾讯防水墙 SDK 脚本加载失败' });
+					return;
+				}
+
+				var captchaInstance = new TencentCaptcha(appId, function(res) {
+					// res 格式: { ret: 0, ticket: "...", randstr: "..." }
+					// ret: 0 -> 验证成功
+					// ret: 2 -> 用户主动点击关闭按钮
+					sendResultToHost(res);
+				}, {
+					needFeedBack: false,
+					ready: function() {
+						hideLoading();
+					}
+				});
+
+				captchaInstance.show();
+			} catch (err) {
+				hideLoading();
+				console.error('[TCaptcha Webview] 唤起异常:', err);
+				sendResultToHost({ ret: -1, errMsg: err.message || '调起验证码异常' });
+			}
+		}
+
+		// HTML5+ 就绪回调
+		function onPlusReady() {
+			// 监听安卓物理返回键
+			plus.key.addEventListener('backbutton', function() {
+				console.log('[TCaptcha Webview] 用户点击物理返回键');
+				sendResultToHost({ ret: 2, errMsg: '用户取消验证' });
+			}, false);
+
+			triggerCaptcha();
+		}
+
+		if (window.plus) {
+			onPlusReady();
+		} else {
+			document.addEventListener('plusready', onPlusReady, false);
+		}
+
+		// 容灾兼容
+		setTimeout(function() {
+			if (!window.plus) {
+				triggerCaptcha();
+			}
+		}, 300);
+	</script>
+</body>
+</html>
